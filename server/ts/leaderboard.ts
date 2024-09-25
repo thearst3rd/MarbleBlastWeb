@@ -41,6 +41,47 @@ export const getLeaderboard = async (res: http.ServerResponse, body: string) => 
 	res.end(stringified);
 };
 
+/** Transmits all the scores for the Marbleland mission specified by the ID in the correct format as expected by Marbleland leaderboards integration */
+export const getLeaderboardForMarbleland = async (res: http.ServerResponse, url: url.URL) => {
+	const missionId = url.searchParams.get('id');
+
+	if (!missionId || !Number.isInteger(Number(missionId))) throw new Error("Missing id.");
+
+	let rows: ScoreRow[] = [];
+
+	let customLevelInfo = shared.customLevelList.find(x => x.id === Number(missionId));
+	if (customLevelInfo) {
+		// Build up the mission path
+		let mission = `custom/${Number(missionId)}`;
+		if (customLevelInfo.modification === 'platinum') {
+			mission = 'mbp/' + mission;
+		} else if (customLevelInfo.modification === 'ultra') {
+			mission = 'mbu/' + mission;
+		}
+
+		rows = shared.getLeaderboardForMissionStatement.all(mission);
+	}
+
+	let response = {
+		scores: rows.map((x, i) => {
+			return {
+				placement: i + 1,
+				username: x.username.slice(0, 16),
+				score: x.time,
+				score_type: 'time' // No PQ/Hunt in Webport
+			};
+		})
+	};
+
+	let stringified = JSON.stringify(response);
+	res.writeHead(200, {
+		'Content-Type': 'application/json',
+		'Content-Length': Buffer.byteLength(stringified),
+		'Cache-Control': 'no-cache, no-store' // Don't cache this
+	});
+	res.end(stringified);
+};
+
 /** Submits new scores to the leaderboard. */
 export const submitScores = async (res: http.ServerResponse, body: string) => {
 	if (!body) throw new Error("Missing body.");
@@ -86,15 +127,18 @@ export const submitScores = async (res: http.ServerResponse, body: string) => {
 		if (isTopScore) {
 			if (shared.config.discordWebhookUrl) {
 				// Broadcast a world record message to the webhook URL
+				let url = shared.config.discordWebhookUrl;
 				let allowed = true;
 				if (missionPath.includes('custom/')) {
+					if (shared.config.discordWebhookUrlCustom)
+						url = shared.config.discordWebhookUrlCustom;
 					let scoreCount = shared.getLeaderboardForMissionStatement.all(missionPath).length;
 					if (scoreCount < shared.config.webhookCustomMinScoreThreshold) {
 						allowed = false; // Not enough scores yet, don't broadcast
 					}
 				}
 
-				if (allowed) broadcastToWebhook(missionPath, score, data.randomId, oldTopScore);
+				if (allowed) broadcastToWebhook(url, missionPath, score, data.randomId, oldTopScore);
 			}
 		}
 	}
@@ -105,7 +149,7 @@ export const submitScores = async (res: http.ServerResponse, body: string) => {
 };
 
 /** Broadcasts a new #1 score to a Discord webhook as a world record message. */
-const broadcastToWebhook = (missionPath: string, score: [string, number], userRandomId: string, previousRecord?: ScoreRow) => {
+const broadcastToWebhook = (url: string, missionPath: string, score: [string, number], userRandomId: string, previousRecord?: ScoreRow) => {
 	let missionName = escapeDiscord(getMissionNameFromMissionPath(missionPath)).trim();
 	let timeString = secondsToTimeString(score[1] / 1000);
 	let modification = missionPath.startsWith('mbp')? 'platinum': missionPath.startsWith('mbu')? 'ultra' : 'gold';
@@ -145,7 +189,7 @@ const broadcastToWebhook = (missionPath: string, score: [string, number], userRa
 		message += `_${diffString} (${relativeDiffString})_`;
 	}
 
-	fetch(shared.config.discordWebhookUrl, {
+	fetch(url, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json'
